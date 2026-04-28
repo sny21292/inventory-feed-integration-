@@ -1,23 +1,26 @@
 const express = require('express');
 const crypto = require('crypto');
+const fs = require('fs');
+const cronParser = require('cron-parser');
+const cronstrue = require('cronstrue');
 const config = require('./config');
 const { exchangeCodeForToken, saveTokenToEnv } = require('./shopify');
-const { getRecentSends, getLastSuccess } = require('./db');
+const { getRecentSends, getLastSuccess, getLastSuccessfulRun, getRecentRuns } = require('./db');
 
 const app = express();
+app.use(express.json());
 
-/**
- * OAuth callback - Shopify redirects here with authorization code
- */
+// ---------------------------------------------------------------------------
+// OAuth callback
+// ---------------------------------------------------------------------------
 app.get('/auth/callback', async (req, res) => {
   try {
-    const { code, shop, hmac, timestamp } = req.query;
+    const { code, shop, hmac } = req.query;
 
     if (!code || !shop) {
       return res.status(400).send('Missing code or shop parameter');
     }
 
-    // Verify HMAC
     const params = { ...req.query };
     delete params.hmac;
     const sortedParams = Object.keys(params)
@@ -33,162 +36,496 @@ app.get('/auth/callback', async (req, res) => {
       return res.status(401).send('HMAC verification failed');
     }
 
-    // Exchange code for access token
     const token = await exchangeCodeForToken(code);
     saveTokenToEnv(token);
 
     console.log('OAuth complete. Access token saved.');
-    res.send(`
-      <html>
-        <head><title>Setup Complete</title></head>
-        <body style="font-family: sans-serif; text-align: center; padding: 60px;">
-          <h1>Setup Complete</h1>
-          <p>Access token has been saved. The inventory feed is now ready.</p>
-          <p>You can close this window and go back to Shopify Admin.</p>
-        </body>
-      </html>
-    `);
+    res.type('html').send(`<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Setup Complete</title>
+<style>body{font-family:'DM Sans',system-ui,sans-serif;text-align:center;padding:60px;background:#f6f6f1;color:#1a1a18}h1{font-size:24px}</style>
+</head><body><h1>Setup Complete</h1><p>Access token saved. The inventory feed is now ready.</p><p>You can close this window.</p></body></html>`);
   } catch (err) {
     console.error('OAuth callback error:', err.message);
     res.status(500).send(`OAuth error: ${err.message}`);
   }
 });
 
-/**
- * Dashboard - shows feed status (loads inside Shopify Admin iframe)
- */
+// ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
 app.get('/', (req, res) => {
   if (!config.shopifyAccessToken) {
-    // Not set up yet - show setup link
     const scopes = 'read_products,read_inventory,read_locations';
     const redirectUri = `${config.appUrl}/auth/callback`;
     const installUrl = `https://${config.shopifyStore}/admin/oauth/authorize?client_id=${config.shopifyClientId}&scope=${scopes}&redirect_uri=${encodeURIComponent(redirectUri)}`;
-
-    return res.send(`
-      <html>
-        <head><title>Inventory Feed - Setup</title></head>
-        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 40px auto; padding: 20px;">
-          <h1>Inventory Feed Integration</h1>
-          <p>Setup required. Click the button below to authorize the app.</p>
-          <a href="${installUrl}" style="display: inline-block; background: #008060; color: white; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-size: 16px;">
-            Authorize App
-          </a>
-        </body>
-      </html>
-    `);
+    return res.type('html').send(`<!DOCTYPE html>
+<html><head><title>Setup</title></head><body style="font-family:sans-serif;text-align:center;padding:60px">
+<h1>Inventory Feed — Setup Required</h1>
+<a href="${installUrl}" style="display:inline-block;background:#2a6b4a;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-size:16px">Authorize App</a>
+</body></html>`);
   }
 
-  // Dashboard view
-  let lastSuccess = null;
-  let recentSends = [];
+  // Compute uptime
+  const uptimeSeconds = Math.floor(process.uptime());
+  const days = Math.floor(uptimeSeconds / 86400);
+  const hours = Math.floor((uptimeSeconds % 86400) / 3600);
+  const minutes = Math.floor((uptimeSeconds % 3600) / 60);
+  const uptimeStr = days > 0
+    ? `${days}d ${hours}h ${minutes}m`
+    : hours > 0
+      ? `${hours}h ${minutes}m`
+      : `${minutes}m`;
+
+  const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+
+  // Last successful run
+  let lastFeedSent = 'No runs yet';
   try {
-    lastSuccess = getLastSuccess();
-    recentSends = getRecentSends(10);
-  } catch (e) {
-    // DB may not exist yet
+    const lastRun = getLastSuccessfulRun();
+    if (lastRun) lastFeedSent = lastRun.completed_at;
+  } catch (e) {}
+
+  // Next scheduled run
+  let nextRun = 'Unknown';
+  try {
+    const interval = cronParser.parseExpression(config.cronSchedule, { tz: config.timezone });
+    nextRun = interval.next().toISOString().replace('T', ' ').slice(0, 16) + ' ' + config.timezone;
+  } catch (e) {}
+
+  // Schedule description
+  let scheduleDesc = config.cronSchedule;
+  try {
+    scheduleDesc = cronstrue.toString(config.cronSchedule);
+  } catch (e) {}
+
+  // Warehouses
+  const warehouses = ['Riverside Warehouse', 'TOR Production'];
+
+  // Recipients
+  const recipients = config.recipients.length > 0 ? config.recipients.join(', ') : 'Not configured';
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Inventory Feed Integration</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=DM+Mono:wght@400;500&display=swap');
+
+  *{margin:0;padding:0;box-sizing:border-box}
+
+  :root{
+    --bg:#f6f6f1;
+    --card:#ffffff;
+    --border:#e2e0d8;
+    --text:#1a1a18;
+    --text-secondary:#6b6960;
+    --accent:#2a6b4a;
+    --accent-light:#e8f3ed;
+    --accent-warm:#c97d3c;
+    --accent-warm-light:#fef6ee;
+    --mono:#5c6b5e;
+    --shadow:0 1px 3px rgba(26,26,24,.06),0 1px 2px rgba(26,26,24,.04);
+    --shadow-lg:0 4px 12px rgba(26,26,24,.08),0 1px 3px rgba(26,26,24,.06);
+    --radius:10px;
   }
 
-  const now = new Date().toLocaleString('en-US', { timeZone: config.timezone });
-  const nextRun = config.cronSchedule;
+  body{
+    font-family:'DM Sans',system-ui,-apple-system,sans-serif;
+    background:var(--bg);
+    color:var(--text);
+    line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+    padding:0;
+    min-height:100vh;
+  }
 
-  const historyRows = recentSends
-    .map(
-      (s) =>
-        `<tr>
-          <td>${s.sent_at}</td>
-          <td>${s.recipient}</td>
-          <td>${s.row_count}</td>
-          <td style="color: ${s.status === 'success' ? '#008060' : '#d72c0d'}">${s.status}</td>
-          <td>${s.error || '-'}</td>
-        </tr>`
-    )
-    .join('');
+  .shell{
+    max-width:840px;
+    margin:0 auto;
+    padding:32px 24px 48px;
+  }
 
-  res.send(`
-    <html>
-      <head>
-        <title>Inventory Feed Integration</title>
-        <style>
-          * { box-sizing: border-box; margin: 0; padding: 0; }
-          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 24px; background: #f6f6f7; color: #1a1a1a; }
-          .header { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
-          .header h1 { font-size: 20px; font-weight: 600; }
-          .header p { color: #6d7175; font-size: 14px; }
-          .card { background: white; border: 1px solid #e1e3e5; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
-          .card h2 { font-size: 14px; font-weight: 600; color: #6d7175; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
-          .status-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
-          .status-item label { display: block; font-size: 12px; color: #6d7175; margin-bottom: 4px; }
-          .status-item .value { font-size: 16px; font-weight: 600; }
-          .online { color: #008060; }
-          table { width: 100%; border-collapse: collapse; font-size: 13px; }
-          th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #e1e3e5; }
-          th { font-weight: 600; color: #6d7175; font-size: 12px; text-transform: uppercase; }
-        </style>
-      </head>
-      <body>
-        <div class="header">
-          <div>
-            <h1>Inventory Feed Integration</h1>
-            <p>Daily CSV feed for Turn Offroad</p>
-          </div>
+  /* ── header ── */
+  .header{
+    display:flex;
+    align-items:center;
+    gap:14px;
+    margin-bottom:32px;
+    padding-bottom:24px;
+    border-bottom:1px solid var(--border);
+  }
+  .header-icon{
+    width:42px;height:42px;
+    background:var(--accent);
+    border-radius:10px;
+    display:flex;align-items:center;justify-content:center;
+    flex-shrink:0;
+  }
+  .header-icon svg{width:22px;height:22px;fill:none;stroke:#fff;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;}
+  .header h1{font-size:20px;font-weight:700;letter-spacing:-.3px;color:var(--text)}
+  .header p{font-size:13px;color:var(--text-secondary);margin-top:2px}
+
+  /* ── cards ── */
+  .card{
+    background:var(--card);
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    box-shadow:var(--shadow);
+    padding:24px;
+    margin-bottom:16px;
+  }
+  .card-label{
+    font-size:11px;
+    font-weight:600;
+    text-transform:uppercase;
+    letter-spacing:.8px;
+    color:var(--text-secondary);
+    margin-bottom:16px;
+    display:flex;align-items:center;gap:6px;
+  }
+  .card-label svg{width:14px;height:14px;stroke:var(--text-secondary);fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+
+  /* ── status ── */
+  .status-row{
+    display:flex;
+    align-items:center;
+    gap:24px;
+    flex-wrap:wrap;
+  }
+  .status-item{display:flex;flex-direction:column;gap:4px}
+  .status-item .label{font-size:12px;color:var(--text-secondary);font-weight:500}
+  .status-item .value{font-family:'DM Mono',monospace;font-size:14px;font-weight:500;color:var(--text)}
+  .status-dot{
+    display:inline-flex;align-items:center;gap:7px;
+    font-family:'DM Mono',monospace;font-size:14px;font-weight:500;
+    color:var(--accent);
+  }
+  .status-dot::before{
+    content:'';display:inline-block;
+    width:8px;height:8px;
+    background:var(--accent);
+    border-radius:50%;
+    box-shadow:0 0 0 3px var(--accent-light);
+    animation:pulse 2.5s ease-in-out infinite;
+  }
+  @keyframes pulse{
+    0%,100%{box-shadow:0 0 0 3px var(--accent-light)}
+    50%{box-shadow:0 0 0 6px rgba(42,107,74,.08)}
+  }
+
+  .divider{
+    width:100%;height:1px;
+    background:var(--border);
+    margin:20px 0;
+  }
+
+  /* ── steps ── */
+  .steps{display:flex;flex-direction:column;gap:0}
+  .step{
+    display:flex;
+    align-items:flex-start;
+    gap:16px;
+    padding:14px 0;
+    position:relative;
+  }
+  .step+.step{border-top:1px dashed var(--border)}
+  .step-num{
+    width:28px;height:28px;
+    border-radius:50%;
+    background:var(--accent-light);
+    color:var(--accent);
+    font-family:'DM Mono',monospace;
+    font-size:12px;font-weight:600;
+    display:flex;align-items:center;justify-content:center;
+    flex-shrink:0;
+    margin-top:1px;
+  }
+  .step-content h3{font-size:14px;font-weight:600;margin-bottom:3px;color:var(--text)}
+  .step-content p{font-size:13px;color:var(--text-secondary);line-height:1.5}
+
+  /* ── config grid ── */
+  .config-grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:0;
+  }
+  .config-item{
+    padding:14px 0;
+    border-bottom:1px solid var(--border);
+  }
+  .config-item:nth-child(odd){padding-right:20px;border-right:1px solid var(--border)}
+  .config-item:nth-child(even){padding-left:20px}
+  .config-item:nth-last-child(-n+2){border-bottom:none}
+  .config-item .label{font-size:12px;color:var(--text-secondary);font-weight:500;margin-bottom:4px}
+  .config-item .value{font-family:'DM Mono',monospace;font-size:13px;color:var(--text);font-weight:500;word-break:break-all}
+  .config-item .value.tag{
+    display:inline-flex;gap:6px;flex-wrap:wrap;
+  }
+  .tag-pill{
+    background:var(--accent-warm-light);
+    color:var(--accent-warm);
+    font-family:'DM Mono',monospace;
+    font-size:11px;font-weight:600;
+    padding:3px 10px;
+    border-radius:20px;
+    letter-spacing:.3px;
+  }
+
+  /* ── links ── */
+  .links{
+    display:flex;gap:10px;flex-wrap:wrap;
+  }
+  .link-btn{
+    display:inline-flex;align-items:center;gap:8px;
+    padding:10px 18px;
+    background:var(--card);
+    border:1px solid var(--border);
+    border-radius:8px;
+    font-family:'DM Sans',sans-serif;
+    font-size:13px;font-weight:600;
+    color:var(--text);
+    text-decoration:none;
+    transition:all .15s ease;
+    box-shadow:var(--shadow);
+    cursor:pointer;
+  }
+  .link-btn:hover{
+    border-color:var(--accent);
+    color:var(--accent);
+    box-shadow:var(--shadow-lg);
+    transform:translateY(-1px);
+  }
+  .link-btn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+
+  /* ── footer ── */
+  .footer{
+    text-align:center;
+    padding-top:32px;
+    font-size:12px;
+    color:var(--text-secondary);
+    letter-spacing:.2px;
+  }
+  .footer span{font-weight:600;color:var(--text)}
+
+  /* ── two-column layout for status + links ── */
+  .row-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:640px){
+    .row-2{grid-template-columns:1fr}
+    .config-grid{grid-template-columns:1fr}
+    .config-item:nth-child(odd){padding-right:0;border-right:none}
+    .config-item:nth-child(even){padding-left:0}
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <div class="header">
+    <div class="header-icon">
+      <svg viewBox="0 0 24 24"><path d="M16.5 9.4l-9-5.19"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+    </div>
+    <div>
+      <h1>Inventory Feed</h1>
+      <p>Daily inventory CSV delivery for Turn Offroad partners</p>
+    </div>
+  </div>
+
+  <div class="row-2">
+    <div class="card">
+      <div class="card-label">
+        <svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+        System Status
+      </div>
+      <div class="status-row">
+        <div class="status-item">
+          <span class="label">Server</span>
+          <span class="status-dot">Online</span>
         </div>
-
-        <div class="card">
-          <h2>System Status</h2>
-          <div class="status-grid">
-            <div class="status-item">
-              <label>Server</label>
-              <div class="value online">Online</div>
-            </div>
-            <div class="status-item">
-              <label>Schedule</label>
-              <div class="value">${nextRun} (${config.timezone})</div>
-            </div>
-            <div class="status-item">
-              <label>Last Success</label>
-              <div class="value">${lastSuccess ? lastSuccess.sent_at : 'No runs yet'}</div>
-            </div>
-          </div>
+        <div class="status-item">
+          <span class="label">Uptime</span>
+          <span class="value">${uptimeStr}</span>
         </div>
-
-        <div class="card">
-          <h2>Configuration</h2>
-          <div class="status-grid">
-            <div class="status-item">
-              <label>Recipients</label>
-              <div class="value">${config.recipients.length > 0 ? config.recipients.join(', ') : 'Not configured'}</div>
-            </div>
-            <div class="status-item">
-              <label>Brand</label>
-              <div class="value">${config.brand}</div>
-            </div>
-            <div class="status-item">
-              <label>Warehouses</label>
-              <div class="value">Riverside, TOR Production</div>
-            </div>
-          </div>
+      </div>
+      <div class="divider"></div>
+      <div class="status-item">
+        <span class="label">Last checked</span>
+        <span class="value" style="font-size:12px;color:var(--text-secondary)">${timestamp}</span>
+      </div>
+      <div class="divider"></div>
+      <div class="status-row">
+        <div class="status-item">
+          <span class="label">Last feed sent</span>
+          <span class="value" style="font-size:12px;color:var(--text-secondary)">${lastFeedSent}</span>
         </div>
-
-        <div class="card">
-          <h2>Recent Send History</h2>
-          ${
-            recentSends.length > 0
-              ? `<table>
-                  <thead>
-                    <tr><th>Date</th><th>Recipient</th><th>Rows</th><th>Status</th><th>Error</th></tr>
-                  </thead>
-                  <tbody>${historyRows}</tbody>
-                </table>`
-              : '<p style="color: #6d7175; font-size: 14px;">No sends yet. Run the feed manually with: npm run once</p>'
-          }
+        <div class="status-item">
+          <span class="label">Next scheduled run</span>
+          <span class="value" style="font-size:12px;color:var(--text-secondary)">${nextRun}</span>
         </div>
+      </div>
+    </div>
 
-        <p style="text-align: center; color: #6d7175; font-size: 12px; margin-top: 24px;">
-          Current time: ${now}
-        </p>
-      </body>
-    </html>
-  `);
+    <div class="card">
+      <div class="card-label">
+        <svg viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+        Quick Links
+      </div>
+      <div class="links" style="flex-direction:column">
+        <a class="link-btn" href="/api/run-now" onclick="event.preventDefault();fetch('/api/run-now',{method:'POST',headers:{'Content-Type':'application/json'}}).then(r=>r.json()).then(d=>alert(d.message||d.error)).catch(e=>alert('Error: '+e.message))">
+          <svg viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Send Feed Now
+        </a>
+        <a class="link-btn" href="/api/health" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+          Health Check
+        </a>
+        <a class="link-btn" href="/api/logs" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+          View Recent Logs
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      How It Works
+    </div>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-content">
+          <h3>Cron Triggered</h3>
+          <p>Every day at the configured time, the scheduler kicks off the feed job.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-content">
+          <h3>Inventory Pulled</h3>
+          <p>The server queries Shopify Admin API for active variants in <strong>TOR Production</strong> and <strong>Riverside</strong> warehouses, excluding drafts and unlisted items.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-content">
+          <h3>CSV Generated</h3>
+          <p>A CSV is built per APG's template — SKU, brand (hardcoded <strong>"Turn Offroad"</strong>), and total sellable quantity per warehouse.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-content">
+          <h3>Email Delivered</h3>
+          <p>The CSV is emailed to all configured recipients with a fixed subject line. Each delivery is logged.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      Configuration
+    </div>
+    <div class="config-grid">
+      <div class="config-item">
+        <div class="label">Schedule</div>
+        <div class="value">${scheduleDesc}</div>
+      </div>
+      <div class="config-item">
+        <div class="label">Recipients</div>
+        <div class="value">${recipients}</div>
+      </div>
+      <div class="config-item">
+        <div class="label">Warehouses monitored</div>
+        <div class="value tag">
+          ${warehouses.map((w) => `<span class="tag-pill">${w}</span>`).join('')}
+        </div>
+      </div>
+      <div class="config-item">
+        <div class="label">Subject line</div>
+        <div class="value">${config.emailSubject}</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">Built by <a href="https://www.cloveode.com/" target="_blank" rel="noopener" style="color:var(--accent);font-weight:600;text-decoration:none">CloveOde</a></div>
+
+</div>
+</body>
+</html>`;
+
+  res.type('html').send(html);
+});
+
+// ---------------------------------------------------------------------------
+// API Endpoints
+// ---------------------------------------------------------------------------
+
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    uptime_seconds: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.get('/api/status', (req, res) => {
+  let lastRun = null;
+  let lastStatus = null;
+  try {
+    const run = getLastSuccessfulRun();
+    if (run) {
+      lastRun = run.completed_at;
+      lastStatus = run.status;
+    }
+  } catch (e) {}
+
+  let nextRun = null;
+  try {
+    const interval = cronParser.parseExpression(config.cronSchedule, { tz: config.timezone });
+    nextRun = interval.next().toISOString();
+  } catch (e) {}
+
+  res.json({
+    last_run: lastRun,
+    next_run: nextRun,
+    last_status: lastStatus,
+    recipient_count: config.recipients.length,
+  });
+});
+
+app.get('/api/logs', (req, res) => {
+  try {
+    const runs = getRecentRuns(50);
+    res.json(runs);
+  } catch (e) {
+    res.json([]);
+  }
+});
+
+// POST /api/run-now - protected, triggers immediate feed
+// The runFeed function is injected via setRunFeedFn after index.js wires everything
+let _runFeed = null;
+
+function setRunFeedFn(fn) {
+  _runFeed = fn;
+}
+
+app.post('/api/run-now', async (req, res) => {
+  if (!_runFeed) {
+    return res.status(500).json({ error: 'Feed function not initialized' });
+  }
+
+  try {
+    _runFeed();
+    res.json({ message: 'Feed job triggered. Check /api/logs for results.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 function startServer() {
@@ -197,4 +534,4 @@ function startServer() {
   });
 }
 
-module.exports = { app, startServer };
+module.exports = { app, startServer, setRunFeedFn };

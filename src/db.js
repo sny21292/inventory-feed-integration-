@@ -29,6 +29,19 @@ function getDb() {
     )
   `);
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS feed_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      started_at DATETIME NOT NULL,
+      completed_at DATETIME,
+      status TEXT NOT NULL,
+      recipient_count INTEGER,
+      sku_count INTEGER,
+      csv_size_bytes INTEGER,
+      error_message TEXT
+    )
+  `);
+
   return db;
 }
 
@@ -41,6 +54,54 @@ function logSend({ recipient, filename, rowCount, status, error }) {
     INSERT INTO send_log (recipient, filename, row_count, status, error)
     VALUES (?, ?, ?, ?, ?)
   `).run(recipient, filename, rowCount, status, error || null);
+}
+
+/**
+ * Start a feed run (returns the run ID)
+ */
+function startFeedRun() {
+  const db = getDb();
+  const result = db.prepare(`
+    INSERT INTO feed_runs (started_at, status) VALUES (datetime('now'), 'running')
+  `).run();
+  return result.lastInsertRowid;
+}
+
+/**
+ * Complete a feed run
+ */
+function completeFeedRun(runId, { status, recipientCount, skuCount, csvSizeBytes, errorMessage }) {
+  const db = getDb();
+  db.prepare(`
+    UPDATE feed_runs
+    SET completed_at = datetime('now'),
+        status = ?,
+        recipient_count = ?,
+        sku_count = ?,
+        csv_size_bytes = ?,
+        error_message = ?
+    WHERE id = ?
+  `).run(status, recipientCount || null, skuCount || null, csvSizeBytes || null, errorMessage || null, runId);
+}
+
+/**
+ * Get recent feed runs
+ */
+function getRecentRuns(limit = 50) {
+  const db = getDb();
+  return db.prepare(`
+    SELECT * FROM feed_runs ORDER BY id DESC LIMIT ?
+  `).all(limit);
+}
+
+/**
+ * Get last successful feed run
+ */
+function getLastSuccessfulRun() {
+  const db = getDb();
+  return db.prepare(`
+    SELECT * FROM feed_runs WHERE status = 'success' ORDER BY id DESC LIMIT 1
+  `).get();
 }
 
 /**
@@ -63,4 +124,12 @@ function getLastSuccess() {
   `).get();
 }
 
-module.exports = { logSend, getRecentSends, getLastSuccess };
+module.exports = {
+  logSend,
+  getRecentSends,
+  getLastSuccess,
+  startFeedRun,
+  completeFeedRun,
+  getRecentRuns,
+  getLastSuccessfulRun,
+};

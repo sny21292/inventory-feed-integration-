@@ -1,16 +1,19 @@
 const cron = require('node-cron');
+const fs = require('fs');
 const config = require('./config');
 const { fetchInventory } = require('./shopify');
 const { generateCSV, cleanupOldCSVs } = require('./csv');
 const { sendFeedEmail, sendAlertEmail } = require('./mailer');
-const { logSend } = require('./db');
-const { startServer } = require('./server');
+const { logSend, startFeedRun, completeFeedRun } = require('./db');
+const { startServer, setRunFeedFn } = require('./server');
 
 /**
  * Main feed job: fetch inventory → generate CSV → email to all recipients → log results
  */
 async function runFeed() {
   console.log(`[${new Date().toISOString()}] Starting inventory feed...`);
+
+  const runId = startFeedRun();
 
   try {
     // 1. Fetch inventory from Shopify
@@ -24,15 +27,18 @@ async function runFeed() {
 
     // 2. Generate CSV
     const { filePath, fileName, rowCount } = generateCSV(variants);
-    console.log(`Generated CSV: ${fileName} (${rowCount} rows)`);
+    const csvSize = fs.statSync(filePath).size;
+    console.log(`Generated CSV: ${fileName} (${rowCount} rows, ${csvSize} bytes)`);
 
     // 3. Send to all recipients
+    let failCount = 0;
     for (const recipient of config.recipients) {
       try {
         await sendFeedEmail(recipient, filePath, fileName, rowCount);
         logSend({ recipient, filename: fileName, rowCount, status: 'success' });
         console.log(`Sent to ${recipient}`);
       } catch (err) {
+        failCount++;
         logSend({ recipient, filename: fileName, rowCount, status: 'failed', error: err.message });
         console.error(`Failed to send to ${recipient}:`, err.message);
         await sendAlertEmail(`Failed to send to ${recipient}: ${err.message}`);
@@ -45,9 +51,23 @@ async function runFeed() {
       console.log(`Cleaned up ${deleted} old CSV files`);
     }
 
+    // 5. Log feed run
+    completeFeedRun(runId, {
+      status: failCount === 0 ? 'success' : 'partial',
+      recipientCount: config.recipients.length,
+      skuCount: rowCount,
+      csvSizeBytes: csvSize,
+    });
+
     console.log(`[${new Date().toISOString()}] Feed complete.`);
   } catch (err) {
     console.error(`[${new Date().toISOString()}] Feed failed:`, err.message);
+
+    completeFeedRun(runId, {
+      status: 'failed',
+      errorMessage: err.message,
+    });
+
     try {
       await sendAlertEmail(err.message);
     } catch (alertErr) {
@@ -58,6 +78,9 @@ async function runFeed() {
 
 // Start Express server (for dashboard + OAuth callback)
 startServer();
+
+// Wire up the run-now endpoint
+setRunFeedFn(runFeed);
 
 // Check for --once flag (manual run)
 if (process.argv.includes('--once')) {
