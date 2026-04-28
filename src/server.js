@@ -54,6 +54,19 @@ app.get('/auth/callback', async (req, res) => {
 // Dashboard
 // ---------------------------------------------------------------------------
 app.get('/', (req, res) => {
+  // Block direct browser access — only allow inside Shopify Admin iframe
+  const shop = req.query.shop || req.headers['x-shopify-shop-domain'];
+  const embedded = req.query.embedded || req.query.hmac || req.query.timestamp || shop;
+  if (!embedded) {
+    return res.status(403).type('html').send(`<!DOCTYPE html>
+<html><head><title>Access Denied</title></head>
+<body style="font-family:'DM Sans',system-ui,sans-serif;text-align:center;padding:60px;background:#f6f6f1;color:#1a1a18">
+<h1>Access Denied</h1>
+<p>This app can only be accessed from the Shopify Admin.</p>
+<p style="margin-top:20px"><a href="https://${config.shopifyStore}/admin/apps" style="color:#2a6b4a;font-weight:600">Go to Shopify Admin → Apps</a></p>
+</body></html>`);
+  }
+
   if (!config.shopifyAccessToken) {
     const scopes = 'read_products,read_inventory,read_locations';
     const redirectUri = `${config.appUrl}/auth/callback`;
