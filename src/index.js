@@ -4,14 +4,25 @@ const config = require('./config');
 const { fetchInventory } = require('./shopify');
 const { generateCSV, cleanupOldCSVs } = require('./csv');
 const { sendFeedEmail, sendAlertEmail } = require('./mailer');
-const { logSend, startFeedRun, completeFeedRun } = require('./db');
+const { logSend, startFeedRun, completeFeedRun, getRecipients, seedRecipientsFromEnv } = require('./db');
 const { startServer, setRunFeedFn } = require('./server');
+
+// Seed recipients from .env on first run
+seedRecipientsFromEnv(config.recipients);
 
 /**
  * Main feed job: fetch inventory → generate CSV → email to all recipients → log results
  */
 async function runFeed() {
   console.log(`[${new Date().toISOString()}] Starting inventory feed...`);
+
+  // Get recipients from SQLite (not .env)
+  const recipients = getRecipients().map(r => r.email);
+
+  if (recipients.length === 0) {
+    console.error('No recipients configured. Add recipients from the dashboard.');
+    return;
+  }
 
   const runId = startFeedRun();
 
@@ -32,7 +43,7 @@ async function runFeed() {
 
     // 3. Send to all recipients
     let failCount = 0;
-    for (const recipient of config.recipients) {
+    for (const recipient of recipients) {
       try {
         await sendFeedEmail(recipient, filePath, fileName, rowCount);
         logSend({ recipient, filename: fileName, rowCount, status: 'success' });
@@ -54,7 +65,7 @@ async function runFeed() {
     // 5. Log feed run
     completeFeedRun(runId, {
       status: failCount === 0 ? 'success' : 'partial',
-      recipientCount: config.recipients.length,
+      recipientCount: recipients.length,
       skuCount: rowCount,
       csvSizeBytes: csvSize,
     });

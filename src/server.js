@@ -5,7 +5,7 @@ const cronParser = require('cron-parser');
 const cronstrue = require('cronstrue');
 const config = require('./config');
 const { exchangeCodeForToken, saveTokenToEnv } = require('./shopify');
-const { getRecentSends, getLastSuccess, getLastSuccessfulRun, getRecentRuns } = require('./db');
+const { getRecentSends, getLastSuccess, getLastSuccessfulRun, getRecentRuns, getRecipients, addRecipient, removeRecipient } = require('./db');
 
 const app = express();
 app.use(express.json());
@@ -114,8 +114,10 @@ app.get('/', (req, res) => {
   // Warehouses
   const warehouses = ['Riverside Warehouse', 'TOR Production'];
 
-  // Recipients
-  const recipients = config.recipients.length > 0 ? config.recipients.join(', ') : 'Not configured';
+  // Recipients from SQLite
+  let recipientsList = [];
+  try { recipientsList = getRecipients(); } catch (e) {}
+  const recipientsDisplay = recipientsList.length > 0 ? recipientsList.map(r => r.email).join(', ') : 'No recipients configured';
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -446,7 +448,7 @@ app.get('/', (req, res) => {
       </div>
       <div class="config-item">
         <div class="label">Recipients</div>
-        <div class="value">${recipients}</div>
+        <div class="value">${recipientsDisplay}</div>
       </div>
       <div class="config-item">
         <div class="label">Warehouses monitored</div>
@@ -460,6 +462,67 @@ app.get('/', (req, res) => {
       </div>
     </div>
   </div>
+
+  <div class="card">
+    <div class="card-label">
+      <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      Manage Recipients
+    </div>
+    <div style="margin-bottom:16px">
+      <form id="addRecipientForm" style="display:flex;gap:8px;align-items:center">
+        <input type="email" id="newEmail" placeholder="Enter email address" required style="flex:1;padding:10px 14px;border:1px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:13px;outline:none;transition:border-color .15s" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'" />
+        <button type="submit" style="padding:10px 18px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;transition:opacity .15s" onmouseover="this.style.opacity='0.9'" onmouseout="this.style.opacity='1'">Add Recipient</button>
+      </form>
+    </div>
+    <div id="recipientsList">
+      ${recipientsList.length === 0 ? '<p style="color:var(--text-secondary);font-size:13px">No recipients added yet.</p>' : recipientsList.map(r => `
+      <div class="recipient-row" id="recipient-${r.id}" style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:center;gap:8px">
+          <svg style="width:16px;height:16px;stroke:var(--accent);fill:none;stroke-width:2" viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+          <span style="font-family:'DM Mono',monospace;font-size:13px;font-weight:500">${r.email}</span>
+        </div>
+        <button onclick="removeRecipient(${r.id})" style="padding:6px 12px;background:none;border:1px solid #e5534b;border-radius:6px;color:#e5534b;font-family:'DM Sans',sans-serif;font-size:11px;font-weight:600;cursor:pointer;transition:all .15s" onmouseover="this.style.background='#e5534b';this.style.color='#fff'" onmouseout="this.style.background='none';this.style.color='#e5534b'">Remove</button>
+      </div>`).join('')}
+    </div>
+  </div>
+
+  <script>
+    document.getElementById('addRecipientForm').addEventListener('submit', async function(e) {
+      e.preventDefault();
+      const email = document.getElementById('newEmail').value.trim();
+      if (!email) return;
+      try {
+        const res = await fetch('/api/recipients', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email })
+        });
+        const data = await res.json();
+        if (data.success) {
+          location.reload();
+        } else {
+          alert(data.error || 'Failed to add recipient');
+        }
+      } catch (err) {
+        alert('Error: ' + err.message);
+      }
+    });
+
+    async function removeRecipient(id) {
+      if (!confirm('Remove this recipient?')) return;
+      try {
+        const res = await fetch('/api/recipients/' + id, { method: 'DELETE' });
+        const data = await res.json();
+        if (data.success) {
+          document.getElementById('recipient-' + id).remove();
+        } else {
+          alert(data.error || 'Failed to remove');
+        }
+      } catch (err) {
+        alert('Error: ' + err.message);
+      }
+    }
+  </script>
 
   <div class="footer">Built by <a href="https://www.cloveode.com/" target="_blank" rel="noopener" style="color:var(--accent);font-weight:600;text-decoration:none">CloveOde</a></div>
 
@@ -513,6 +576,38 @@ app.get('/api/logs', (req, res) => {
     res.json(runs);
   } catch (e) {
     res.json([]);
+  }
+});
+
+// Recipients API
+app.get('/api/recipients', (req, res) => {
+  try {
+    const recipients = getRecipients();
+    res.json({ success: true, recipients });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/recipients', (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ success: false, error: 'Invalid email address' });
+    }
+    addRecipient(email.trim().toLowerCase());
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.delete('/api/recipients/:id', (req, res) => {
+  try {
+    removeRecipient(parseInt(req.params.id, 10));
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
   }
 });
 

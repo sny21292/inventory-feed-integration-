@@ -30,6 +30,15 @@ function getDb() {
   `);
 
   db.exec(`
+    CREATE TABLE IF NOT EXISTS recipients (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT NOT NULL UNIQUE,
+      added_at TEXT NOT NULL DEFAULT (datetime('now')),
+      active INTEGER NOT NULL DEFAULT 1
+    )
+  `);
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS feed_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       started_at DATETIME NOT NULL,
@@ -124,6 +133,50 @@ function getLastSuccess() {
   `).get();
 }
 
+/**
+ * Get all active recipients
+ */
+function getRecipients() {
+  const db = getDb();
+  return db.prepare('SELECT * FROM recipients WHERE active = 1 ORDER BY added_at').all();
+}
+
+/**
+ * Add a recipient
+ */
+function addRecipient(email) {
+  const db = getDb();
+  // Try to reactivate if previously removed
+  const existing = db.prepare('SELECT * FROM recipients WHERE email = ?').get(email);
+  if (existing) {
+    db.prepare('UPDATE recipients SET active = 1 WHERE email = ?').run(email);
+    return existing.id;
+  }
+  const result = db.prepare('INSERT INTO recipients (email) VALUES (?)').run(email);
+  return result.lastInsertRowid;
+}
+
+/**
+ * Remove a recipient (soft delete)
+ */
+function removeRecipient(id) {
+  const db = getDb();
+  db.prepare('UPDATE recipients SET active = 0 WHERE id = ?').run(id);
+}
+
+/**
+ * Seed recipients from .env (one-time, on first run)
+ */
+function seedRecipientsFromEnv(envRecipients) {
+  const db = getDb();
+  const count = db.prepare('SELECT COUNT(*) as c FROM recipients').get().c;
+  if (count === 0 && envRecipients.length > 0) {
+    for (const email of envRecipients) {
+      db.prepare('INSERT OR IGNORE INTO recipients (email) VALUES (?)').run(email.trim());
+    }
+  }
+}
+
 module.exports = {
   logSend,
   getRecentSends,
@@ -132,4 +185,8 @@ module.exports = {
   completeFeedRun,
   getRecentRuns,
   getLastSuccessfulRun,
+  getRecipients,
+  addRecipient,
+  removeRecipient,
+  seedRecipientsFromEnv,
 };
