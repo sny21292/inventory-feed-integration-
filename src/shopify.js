@@ -61,7 +61,7 @@ async function fetchInventory() {
     const afterClause = cursor ? `, after: "${cursor}"` : '';
     const query = `
       {
-        products(first: 50, query: "status:active"${afterClause}) {
+        products(first: 10, query: "status:active"${afterClause}) {
           pageInfo {
             hasNextPage
           }
@@ -69,7 +69,6 @@ async function fetchInventory() {
             cursor
             node {
               status
-              publishedOnCurrentChannel
               variants(first: 100) {
                 edges {
                   node {
