@@ -164,18 +164,6 @@ function removeRecipient(id) {
   db.prepare('UPDATE recipients SET active = 0 WHERE id = ?').run(id);
 }
 
-/**
- * Seed recipients from .env (one-time, on first run)
- */
-function seedRecipientsFromEnv(envRecipients) {
-  const db = getDb();
-  const count = db.prepare('SELECT COUNT(*) as c FROM recipients').get().c;
-  if (count === 0 && envRecipients.length > 0) {
-    for (const email of envRecipients) {
-      db.prepare('INSERT OR IGNORE INTO recipients (email) VALUES (?)').run(email.trim());
-    }
-  }
-}
 
 module.exports = {
   logSend,
@@ -188,5 +176,4 @@ module.exports = {
   getRecipients,
   addRecipient,
   removeRecipient,
-  seedRecipientsFromEnv,
 };

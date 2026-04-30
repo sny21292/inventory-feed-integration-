@@ -4,11 +4,9 @@ const config = require('./config');
 const { fetchInventory } = require('./shopify');
 const { generateCSV, cleanupOldCSVs } = require('./csv');
 const { sendFeedEmail, sendAlertEmail } = require('./mailer');
-const { logSend, startFeedRun, completeFeedRun, getRecipients, seedRecipientsFromEnv } = require('./db');
+const { logSend, startFeedRun, completeFeedRun, getRecipients } = require('./db');
 const { startServer, setRunFeedFn } = require('./server');
 
-// Seed recipients from .env on first run
-seedRecipientsFromEnv(config.recipients);
 
 /**
  * Main feed job: fetch inventory → generate CSV → email to all recipients → log results

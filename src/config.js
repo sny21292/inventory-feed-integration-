@@ -9,7 +9,6 @@ const required = [
   'RESEND_API_KEY',
   'FROM_EMAIL',
   'ALERT_EMAIL',
-  'RECIPIENTS',
   'EMAIL_SUBJECT',
   'CRON_SCHEDULE',
   'TIMEZONE',
@@ -38,7 +37,6 @@ module.exports = {
   resendApiKey: process.env.RESEND_API_KEY,
   fromEmail: process.env.FROM_EMAIL,
   alertEmail: process.env.ALERT_EMAIL,
-  recipients: (process.env.RECIPIENTS || '').split(',').map((e) => e.trim()).filter(Boolean),
   emailSubject: process.env.EMAIL_SUBJECT || 'Turn Offroad Daily Inventory Feed',
 
   // Schedule

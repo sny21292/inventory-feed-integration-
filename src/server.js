@@ -566,7 +566,7 @@ app.get('/api/status', (req, res) => {
     last_run: lastRun,
     next_run: nextRun,
     last_status: lastStatus,
-    recipient_count: config.recipients.length,
+    recipient_count: getRecipients().length,
   });
 });
 
