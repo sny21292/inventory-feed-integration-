@@ -1,7 +1,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const fs = require('fs');
-const cronParser = require('cron-parser');
+const { CronExpressionParser } = require('cron-parser');
 const cronstrue = require('cronstrue');
 const config = require('./config');
 const { exchangeCodeForToken, saveTokenToEnv } = require('./shopify');
@@ -102,19 +102,27 @@ app.get('/', (req, res) => {
 
   const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
 
-  // Last successful run
+  // Last successful run (label as UTC for consistency with "Last checked")
   let lastFeedSent = 'No runs yet';
   try {
     const lastRun = getLastSuccessfulRun();
-    if (lastRun) lastFeedSent = lastRun.completed_at;
+    if (lastRun && lastRun.completed_at) lastFeedSent = `${lastRun.completed_at} UTC`;
   } catch (e) {}
 
-  // Next scheduled run
+  // Next scheduled run (cron-parser v5 API)
   let nextRun = 'Unknown';
   try {
-    const interval = cronParser.parseExpression(config.cronSchedule, { tz: config.timezone });
-    nextRun = interval.next().toISOString().replace('T', ' ').slice(0, 16) + ' ' + config.timezone;
-  } catch (e) {}
+    const interval = CronExpressionParser.parse(config.cronSchedule, { tz: config.timezone });
+    const next = interval.next().toDate();
+    // Format in the configured timezone (e.g. "May 2, 2026, 6:00 AM EDT")
+    nextRun = next.toLocaleString('en-US', {
+      timeZone: config.timezone,
+      year: 'numeric', month: 'short', day: 'numeric',
+      hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
+    });
+  } catch (e) {
+    console.error('[server] failed to parse cron schedule for dashboard:', e.message);
+  }
 
   // Schedule description
   let scheduleDesc = config.cronSchedule;
@@ -741,8 +749,8 @@ app.get('/api/status', (req, res) => {
 
   let nextRun = null;
   try {
-    const interval = cronParser.parseExpression(config.cronSchedule, { tz: config.timezone });
-    nextRun = interval.next().toISOString();
+    const interval = CronExpressionParser.parse(config.cronSchedule, { tz: config.timezone });
+    nextRun = interval.next().toDate().toISOString();
   } catch (e) {}
 
   res.json({
