@@ -5,7 +5,18 @@ const cronParser = require('cron-parser');
 const cronstrue = require('cronstrue');
 const config = require('./config');
 const { exchangeCodeForToken, saveTokenToEnv } = require('./shopify');
-const { getRecentSends, getLastSuccess, getLastSuccessfulRun, getRecentRuns, getRecipients, addRecipient, removeRecipient } = require('./db');
+const {
+  getRecentSends,
+  getLastSuccess,
+  getLastSuccessfulRun,
+  getRecentRuns,
+  getRecipients,
+  getAllRecipientsRaw,
+  getRecipientById,
+  addRecipient,
+  updateRecipient,
+  removeRecipient,
+} = require('./db');
 
 const app = express();
 app.use(express.json());
@@ -114,10 +125,17 @@ app.get('/', (req, res) => {
   // Warehouses
   const warehouses = ['Riverside Warehouse', 'TOR Production'];
 
-  // Recipients from SQLite
+  // Recipients from SQLite — show all (active + inactive); raw rows so the dashboard
+  // can render method-specific badges and edit forms. Passwords are stripped here.
   let recipientsList = [];
-  try { recipientsList = getRecipients(); } catch (e) {}
-  const recipientsDisplay = recipientsList.length > 0 ? recipientsList.map(r => r.email).join(', ') : 'No recipients configured';
+  try {
+    recipientsList = getAllRecipientsRaw().map((r) => ({ ...r, password: r.password ? '***' : null }));
+  } catch (e) {}
+
+  const activeRecipients = recipientsList.filter((r) => r.active === 1);
+  const recipientsDisplay = activeRecipients.length > 0
+    ? activeRecipients.map((r) => r.method === 'sftp' ? `${r.label} (SFTP)` : r.email).join(', ')
+    : 'No recipients configured';
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -468,40 +486,205 @@ app.get('/', (req, res) => {
       <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
       Manage Recipients
     </div>
-    <div style="margin-bottom:16px">
-      <form id="addRecipientForm" style="display:flex;gap:8px;align-items:center">
-        <input type="email" id="newEmail" placeholder="Enter email address" required style="flex:1;padding:10px 14px;border:1px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:13px;outline:none;transition:border-color .15s" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'" />
-        <button type="submit" style="padding:10px 18px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;transition:opacity .15s" onmouseover="this.style.opacity='0.9'" onmouseout="this.style.opacity='1'">Add Recipient</button>
+    <style>
+      .recipient-form{display:grid;gap:10px;padding:14px;background:#fafaf6;border:1px solid var(--border);border-radius:8px;margin-bottom:16px}
+      .recipient-form .row{display:grid;grid-template-columns:140px 1fr;align-items:center;gap:12px}
+      .recipient-form label{font-size:12px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.4px}
+      .recipient-form input,.recipient-form select{padding:9px 12px;border:1px solid var(--border);border-radius:7px;font-family:'DM Sans',sans-serif;font-size:13px;outline:none;background:#fff}
+      .recipient-form input:focus,.recipient-form select:focus{border-color:var(--accent)}
+      .recipient-form .actions{display:flex;gap:8px;justify-content:flex-end;padding-top:6px;border-top:1px dashed var(--border);margin-top:4px}
+      .btn-primary{padding:9px 18px;background:var(--accent);color:#fff;border:none;border-radius:7px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;cursor:pointer}
+      .btn-primary:hover{opacity:.9}
+      .btn-secondary{padding:9px 18px;background:#fff;color:var(--text);border:1px solid var(--border);border-radius:7px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:500;cursor:pointer}
+      .btn-secondary:hover{border-color:var(--text-secondary)}
+      .method-pill{display:inline-block;padding:2px 8px;border-radius:10px;font-family:'DM Mono',monospace;font-size:10px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;margin-left:8px}
+      .pill-email{background:var(--accent-light);color:var(--accent)}
+      .pill-sftp{background:var(--accent-warm-light);color:var(--accent-warm)}
+      .pill-inactive{background:#f0e9e6;color:#9b7e72;margin-left:8px}
+    </style>
+
+    <div id="recipientFormContainer">
+      <form id="recipientForm" class="recipient-form" style="display:none">
+        <input type="hidden" id="rf-id" value="" />
+        <div class="row">
+          <label>Method</label>
+          <select id="rf-method">
+            <option value="email">Email</option>
+            <option value="sftp">SFTP</option>
+          </select>
+        </div>
+        <div class="row">
+          <label>Label</label>
+          <input type="text" id="rf-label" placeholder="e.g. APG, UTV Source" />
+        </div>
+
+        <!-- Email-only fields -->
+        <div class="row rf-email-only">
+          <label>Email</label>
+          <input type="email" id="rf-email" placeholder="recipient@example.com" />
+        </div>
+
+        <!-- SFTP-only fields -->
+        <div class="row rf-sftp-only" style="display:none">
+          <label>Host</label>
+          <input type="text" id="rf-host" placeholder="sftp.example.com" />
+        </div>
+        <div class="row rf-sftp-only" style="display:none">
+          <label>Port</label>
+          <input type="number" id="rf-port" value="22" min="1" max="65535" />
+        </div>
+        <div class="row rf-sftp-only" style="display:none">
+          <label>Username</label>
+          <input type="text" id="rf-username" autocomplete="off" />
+        </div>
+        <div class="row rf-sftp-only" style="display:none">
+          <label>Password</label>
+          <input type="password" id="rf-password" autocomplete="off" placeholder="(unchanged on edit if blank)" />
+        </div>
+        <div class="row rf-sftp-only" style="display:none">
+          <label>Remote dir</label>
+          <input type="text" id="rf-remote-dir" value="/" placeholder="/" />
+        </div>
+        <div class="row rf-sftp-only" style="display:none">
+          <label>Filename</label>
+          <input type="text" id="rf-filename-template" value="turnoffroad-inventory-{date}.csv" placeholder="must include {date}" />
+        </div>
+
+        <div class="actions">
+          <button type="button" class="btn-secondary" onclick="cancelRecipientForm()">Cancel</button>
+          <button type="submit" class="btn-primary" id="rf-submit">Save</button>
+        </div>
       </form>
+
+      <div id="recipientFormToggle" style="margin-bottom:16px">
+        <button type="button" class="btn-primary" onclick="showAddForm()">+ Add Recipient</button>
+      </div>
     </div>
+
     <div id="recipientsList">
       ${recipientsList.length === 0 ? '<p style="color:var(--text-secondary);font-size:13px">No recipients added yet.</p>' : recipientsList.map(r => `
       <div class="recipient-row" id="recipient-${r.id}" style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
-        <div style="display:flex;align-items:center;gap:8px">
-          <svg style="width:16px;height:16px;stroke:var(--accent);fill:none;stroke-width:2" viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
-          <span style="font-family:'DM Mono',monospace;font-size:13px;font-weight:500">${r.email}</span>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <svg style="width:16px;height:16px;stroke:var(--accent);fill:none;stroke-width:2" viewBox="0 0 24 24">${r.method === 'sftp'
+            ? '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>'
+            : '<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>'}</svg>
+          <span style="font-family:'DM Mono',monospace;font-size:13px;font-weight:500">${r.label}</span>
+          <span class="method-pill ${r.method === 'sftp' ? 'pill-sftp' : 'pill-email'}">${r.method}</span>
+          ${r.active === 0 ? '<span class="method-pill pill-inactive">inactive</span>' : ''}
+          ${r.method === 'sftp' && r.host ? `<span style="font-family:'DM Mono',monospace;font-size:11px;color:var(--text-secondary)">${r.username}@${r.host}:${r.port}${r.remote_dir || '/'}</span>` : ''}
         </div>
-        <button onclick="removeRecipient(${r.id})" style="padding:6px 12px;background:none;border:1px solid #e5534b;border-radius:6px;color:#e5534b;font-family:'DM Sans',sans-serif;font-size:11px;font-weight:600;cursor:pointer;transition:all .15s" onmouseover="this.style.background='#e5534b';this.style.color='#fff'" onmouseout="this.style.background='none';this.style.color='#e5534b'">Remove</button>
+        <div style="display:flex;gap:6px">
+          <button onclick="editRecipient(${r.id})" style="padding:6px 12px;background:none;border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:11px;font-weight:600;cursor:pointer">Edit</button>
+          ${r.active === 1 ? `<button onclick="removeRecipient(${r.id})" style="padding:6px 12px;background:none;border:1px solid #e5534b;border-radius:6px;color:#e5534b;font-family:'DM Sans',sans-serif;font-size:11px;font-weight:600;cursor:pointer" onmouseover="this.style.background='#e5534b';this.style.color='#fff'" onmouseout="this.style.background='none';this.style.color='#e5534b'">Remove</button>` : ''}
+        </div>
       </div>`).join('')}
     </div>
   </div>
 
   <script>
-    document.getElementById('addRecipientForm').addEventListener('submit', async function(e) {
-      e.preventDefault();
-      const email = document.getElementById('newEmail').value.trim();
-      if (!email) return;
+    const form = document.getElementById('recipientForm');
+    const toggleRow = document.getElementById('recipientFormToggle');
+    const methodSelect = document.getElementById('rf-method');
+
+    function setMethodVisibility() {
+      const isSftp = methodSelect.value === 'sftp';
+      document.querySelectorAll('.rf-email-only').forEach((el) => {
+        el.style.display = isSftp ? 'none' : 'grid';
+      });
+      document.querySelectorAll('.rf-sftp-only').forEach((el) => {
+        el.style.display = isSftp ? 'grid' : 'none';
+      });
+    }
+    methodSelect.addEventListener('change', setMethodVisibility);
+
+    function resetForm() {
+      document.getElementById('rf-id').value = '';
+      document.getElementById('rf-method').value = 'email';
+      document.getElementById('rf-label').value = '';
+      document.getElementById('rf-email').value = '';
+      document.getElementById('rf-host').value = '';
+      document.getElementById('rf-port').value = '22';
+      document.getElementById('rf-username').value = '';
+      document.getElementById('rf-password').value = '';
+      document.getElementById('rf-remote-dir').value = '/';
+      document.getElementById('rf-filename-template').value = 'turnoffroad-inventory-{date}.csv';
+      setMethodVisibility();
+    }
+
+    function showAddForm() {
+      resetForm();
+      document.getElementById('rf-submit').textContent = 'Add Recipient';
+      toggleRow.style.display = 'none';
+      form.style.display = 'grid';
+    }
+
+    function cancelRecipientForm() {
+      form.style.display = 'none';
+      toggleRow.style.display = 'block';
+      resetForm();
+    }
+
+    async function editRecipient(id) {
       try {
-        const res = await fetch('/api/recipients', {
-          method: 'POST',
+        const res = await fetch('/api/recipients/' + id);
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || 'Could not load recipient');
+        const r = data.recipient;
+        document.getElementById('rf-id').value = r.id;
+        document.getElementById('rf-method').value = r.method;
+        document.getElementById('rf-label').value = r.label || '';
+        document.getElementById('rf-email').value = r.email || '';
+        document.getElementById('rf-host').value = r.host || '';
+        document.getElementById('rf-port').value = r.port || 22;
+        document.getElementById('rf-username').value = r.username || '';
+        document.getElementById('rf-password').value = '';
+        document.getElementById('rf-remote-dir').value = r.remote_dir || '/';
+        document.getElementById('rf-filename-template').value = r.filename_template || 'turnoffroad-inventory-{date}.csv';
+        setMethodVisibility();
+        document.getElementById('rf-submit').textContent = 'Save Changes';
+        toggleRow.style.display = 'none';
+        form.style.display = 'grid';
+        form.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } catch (err) {
+        alert('Error: ' + err.message);
+      }
+    }
+
+    function buildPayload() {
+      const method = methodSelect.value;
+      const base = {
+        method,
+        label: document.getElementById('rf-label').value.trim(),
+      };
+      if (method === 'email') {
+        return { ...base, email: document.getElementById('rf-email').value.trim() };
+      }
+      return {
+        ...base,
+        host: document.getElementById('rf-host').value.trim(),
+        port: parseInt(document.getElementById('rf-port').value, 10),
+        username: document.getElementById('rf-username').value.trim(),
+        password: document.getElementById('rf-password').value, // may be blank on edit
+        remote_dir: document.getElementById('rf-remote-dir').value.trim() || '/',
+        filename_template: document.getElementById('rf-filename-template').value.trim(),
+      };
+    }
+
+    form.addEventListener('submit', async function (e) {
+      e.preventDefault();
+      const id = document.getElementById('rf-id').value;
+      const payload = buildPayload();
+      try {
+        const res = await fetch(id ? '/api/recipients/' + id : '/api/recipients', {
+          method: id ? 'PUT' : 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email })
+          body: JSON.stringify(payload),
         });
         const data = await res.json();
         if (data.success) {
           location.reload();
         } else {
-          alert(data.error || 'Failed to add recipient');
+          alert(data.error || 'Failed to save');
         }
       } catch (err) {
         alert('Error: ' + err.message);
@@ -514,7 +697,7 @@ app.get('/', (req, res) => {
         const res = await fetch('/api/recipients/' + id, { method: 'DELETE' });
         const data = await res.json();
         if (data.success) {
-          document.getElementById('recipient-' + id).remove();
+          location.reload();
         } else {
           alert(data.error || 'Failed to remove');
         }
@@ -582,23 +765,89 @@ app.get('/api/logs', (req, res) => {
 // Recipients API
 app.get('/api/recipients', (req, res) => {
   try {
-    const recipients = getRecipients();
-    res.json({ success: true, recipients });
+    // Dashboard wants all rows (active + inactive); strip passwords before sending.
+    const rows = getAllRecipientsRaw().map((r) => ({ ...r, password: r.password ? '***' : null }));
+    res.json({ success: true, recipients: rows });
   } catch (e) {
     res.json({ success: false, error: e.message });
   }
 });
 
-app.post('/api/recipients', (req, res) => {
+app.get('/api/recipients/:id', (req, res) => {
   try {
-    const { email } = req.body;
-    if (!email || !email.includes('@')) {
-      return res.status(400).json({ success: false, error: 'Invalid email address' });
-    }
-    addRecipient(email.trim().toLowerCase());
-    res.json({ success: true });
+    const row = getRecipientById(parseInt(req.params.id, 10));
+    if (!row) return res.status(404).json({ success: false, error: 'Not found' });
+    res.json({ success: true, recipient: { ...row, password: row.password ? '***' : null } });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+function parseRecipientPayload(body) {
+  const method = body.method === 'sftp' ? 'sftp' : 'email';
+
+  if (method === 'email') {
+    const email = String(body.email || '').trim().toLowerCase();
+    if (!email || !email.includes('@')) {
+      throw new Error('Invalid email address');
+    }
+    const label = String(body.label || email).trim();
+    return { method, label, email };
+  }
+
+  // sftp
+  const label = String(body.label || '').trim();
+  if (!label) throw new Error('Label is required for SFTP recipients');
+  const host = String(body.host || '').trim();
+  if (!host) throw new Error('Host is required');
+  const port = parseInt(body.port, 10);
+  if (!Number.isFinite(port) || port <= 0) throw new Error('Port must be a positive integer');
+  const username = String(body.username || '').trim();
+  if (!username) throw new Error('Username is required');
+  const password = String(body.password || '');
+  if (!password) throw new Error('Password is required');
+  const remote_dir = String(body.remote_dir || '/').trim() || '/';
+  const filename_template = String(body.filename_template || 'turnoffroad-inventory-{date}.csv').trim();
+  if (!filename_template.includes('{date}')) {
+    throw new Error('filename_template must include {date}');
+  }
+  return { method, label, host, port, username, password, remote_dir, filename_template };
+}
+
+app.post('/api/recipients', (req, res) => {
+  try {
+    const data = parseRecipientPayload(req.body);
+    const id = addRecipient(data);
+    res.json({ success: true, id });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
+app.put('/api/recipients/:id', (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const current = getRecipientById(id);
+    if (!current) return res.status(404).json({ success: false, error: 'Not found' });
+
+    // Allow partial updates: build payload by merging body with current row,
+    // then validate via parseRecipientPayload. If password not provided, keep existing.
+    const merged = {
+      method: req.body.method ?? current.method,
+      label: req.body.label ?? current.label,
+      email: req.body.email ?? current.email,
+      host: req.body.host ?? current.host,
+      port: req.body.port ?? current.port,
+      username: req.body.username ?? current.username,
+      password: req.body.password ? req.body.password : current.password,
+      remote_dir: req.body.remote_dir ?? current.remote_dir,
+      filename_template: req.body.filename_template ?? current.filename_template,
+    };
+    const data = parseRecipientPayload(merged);
+    updateRecipient(id, data);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
   }
 });
 

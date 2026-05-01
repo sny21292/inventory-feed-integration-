@@ -1,41 +1,45 @@
 const { Resend } = require('resend');
-const fs = require('fs');
-const config = require('./config');
+const config = require('../config');
 
 const resend = new Resend(config.resendApiKey);
 
 /**
- * Send CSV as email attachment to a single recipient
+ * Send the CSV as an email attachment to a single recipient.
+ * Returns { success, recipient, method, bytesUploaded }.
  */
-async function sendFeedEmail(recipient, filePath, fileName, rowCount) {
+async function sendEmail(recipient, csvBuffer, csvFilename, rowCount) {
   const today = new Date().toISOString().split('T')[0];
   const subject = `${config.emailSubject} - ${today}`;
 
-  const fileContent = fs.readFileSync(filePath);
-
   const { data, error } = await resend.emails.send({
     from: config.fromEmail,
-    to: recipient,
+    to: recipient.email,
     subject,
     text: `Attached is the daily inventory feed for Turn Offroad.\n\nDate: ${today}\nTotal SKUs: ${rowCount}\nWarehouses: Riverside Warehouse, TOR Production\n\nThis is an automated email.`,
     attachments: [
       {
-        filename: fileName,
-        content: fileContent.toString('base64'),
+        filename: csvFilename,
+        content: csvBuffer.toString('base64'),
         contentType: 'text/csv',
       },
     ],
   });
 
   if (error) {
-    throw new Error(`Resend error for ${recipient}: ${JSON.stringify(error)}`);
+    throw new Error(`Resend error for ${recipient.email}: ${JSON.stringify(error)}`);
   }
 
-  return data;
+  return {
+    success: true,
+    recipient: recipient.email,
+    method: 'email',
+    bytesUploaded: csvBuffer.length,
+    providerMessageId: data?.id ?? null,
+  };
 }
 
 /**
- * Send alert email to admin on failure
+ * Failure-alert email goes to ALERT_EMAIL.
  */
 async function sendAlertEmail(errorMessage) {
   const { error } = await resend.emails.send({
@@ -50,4 +54,4 @@ async function sendAlertEmail(errorMessage) {
   }
 }
 
-module.exports = { sendFeedEmail, sendAlertEmail };
+module.exports = { sendEmail, sendAlertEmail };

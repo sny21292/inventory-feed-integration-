@@ -1,29 +1,23 @@
 const { stringify } = require('csv-stringify/sync');
-const fs = require('fs');
-const path = require('path');
 
-const OUTPUT_DIR = path.join(__dirname, '..', 'output');
+const HEADERS = [
+  'Part Number',
+  'Brand',
+  'Total Quantity',
+  'Riverside Warehouse',
+  'TOR Production',
+];
 
 /**
- * Generate CSV file from inventory data in APG template format
- * Returns { filePath, fileName, rowCount }
+ * Generate CSV in APG format and return it as a Buffer.
+ * Returns { buffer, fileName, rowCount, sizeBytes }.
+ *
+ * fileName is the canonical/default filename (used for the email attachment
+ * and as the SFTP fallback when a recipient has no filename_template).
  */
 function generateCSV(variants) {
-  if (!fs.existsSync(OUTPUT_DIR)) {
-    fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-  }
-
   const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
   const fileName = `turnoffroad-inventory-${today}.csv`;
-  const filePath = path.join(OUTPUT_DIR, fileName);
-
-  const headers = [
-    'Part Number',
-    'Brand',
-    'Total Quantity',
-    'Riverside Warehouse',
-    'TOR Production',
-  ];
 
   const rows = variants.map((v) => [
     v.partNumber,
@@ -33,33 +27,15 @@ function generateCSV(variants) {
     v.torProduction,
   ]);
 
-  const csvContent = stringify([headers, ...rows]);
-  fs.writeFileSync(filePath, csvContent);
+  const csvContent = stringify([HEADERS, ...rows]);
+  const buffer = Buffer.from(csvContent, 'utf-8');
 
-  return { filePath, fileName, rowCount: variants.length };
+  return {
+    buffer,
+    fileName,
+    rowCount: variants.length,
+    sizeBytes: buffer.length,
+  };
 }
 
-/**
- * Clean up CSV files older than 30 days
- */
-function cleanupOldCSVs(daysToKeep = 30) {
-  if (!fs.existsSync(OUTPUT_DIR)) return 0;
-
-  const cutoff = Date.now() - daysToKeep * 24 * 60 * 60 * 1000;
-  const files = fs.readdirSync(OUTPUT_DIR);
-  let deleted = 0;
-
-  for (const file of files) {
-    if (!file.endsWith('.csv')) continue;
-    const filePath = path.join(OUTPUT_DIR, file);
-    const stat = fs.statSync(filePath);
-    if (stat.mtimeMs < cutoff) {
-      fs.unlinkSync(filePath);
-      deleted++;
-    }
-  }
-
-  return deleted;
-}
-
-module.exports = { generateCSV, cleanupOldCSVs };
+module.exports = { generateCSV };
