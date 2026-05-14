@@ -9,14 +9,11 @@ const HEADERS = [
 ];
 
 /**
- * Generate CSV in APG format and return it as a Buffer.
+ * APG vendor-feed format. One row per variant, includes per-location quantities.
  * Returns { buffer, fileName, rowCount, sizeBytes }.
- *
- * fileName is the canonical/default filename (used for the email attachment
- * and as the SFTP fallback when a recipient has no filename_template).
  */
-function generateCSV(variants) {
-  const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+function buildApgCsv(variants) {
+  const today = new Date().toISOString().split('T')[0];
   const fileName = `turnoffroad-inventory-${today}.csv`;
 
   const rows = variants.map((v) => [
@@ -38,4 +35,4 @@ function generateCSV(variants) {
   };
 }
 
-module.exports = { generateCSV };
+module.exports = { buildApgCsv };

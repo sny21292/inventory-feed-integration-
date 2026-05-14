@@ -525,6 +525,13 @@ app.get('/', (req, res) => {
           <label>Label</label>
           <input type="text" id="rf-label" placeholder="e.g. APG, UTV Source" />
         </div>
+        <div class="row">
+          <label>Format</label>
+          <select id="rf-format">
+            <option value="apg">APG (default)</option>
+            <option value="quadratec" class="rf-format-sftp-only">Quadratec (SFTP only)</option>
+          </select>
+        </div>
 
         <!-- Email-only fields -->
         <div class="row rf-email-only">
@@ -555,7 +562,7 @@ app.get('/', (req, res) => {
         </div>
         <div class="row rf-sftp-only" style="display:none">
           <label>Filename</label>
-          <input type="text" id="rf-filename-template" value="turnoffroad-inventory-{date}.csv" placeholder="must include {date}" />
+          <input type="text" id="rf-filename-template" value="turnoffroad-inventory-{date}.csv" placeholder="{date} substitutes to YYYY-MM-DD; literal names also OK" />
         </div>
 
         <div class="actions">
@@ -578,6 +585,7 @@ app.get('/', (req, res) => {
             : '<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>'}</svg>
           <span style="font-family:'DM Mono',monospace;font-size:13px;font-weight:500">${r.label}</span>
           <span class="method-pill ${r.method === 'sftp' ? 'pill-sftp' : 'pill-email'}">${r.method}</span>
+          <span class="method-pill" style="background:#eef0e8;color:#5a6552">${r.format || 'apg'}</span>
           ${r.active === 0 ? '<span class="method-pill pill-inactive">inactive</span>' : ''}
           ${r.method === 'sftp' && r.host ? `<span style="font-family:'DM Mono',monospace;font-size:11px;color:var(--text-secondary)">${r.username}@${r.host}:${r.port}${r.remote_dir || '/'}</span>` : ''}
         </div>
@@ -594,6 +602,8 @@ app.get('/', (req, res) => {
     const toggleRow = document.getElementById('recipientFormToggle');
     const methodSelect = document.getElementById('rf-method');
 
+    const formatSelect = document.getElementById('rf-format');
+
     function setMethodVisibility() {
       const isSftp = methodSelect.value === 'sftp';
       document.querySelectorAll('.rf-email-only').forEach((el) => {
@@ -602,6 +612,14 @@ app.get('/', (req, res) => {
       document.querySelectorAll('.rf-sftp-only').forEach((el) => {
         el.style.display = isSftp ? 'grid' : 'none';
       });
+      // Quadratec is SFTP-only — hide that option when method=email,
+      // and snap a stale "quadratec" selection back to "apg".
+      document.querySelectorAll('.rf-format-sftp-only').forEach((el) => {
+        el.hidden = !isSftp;
+      });
+      if (!isSftp && formatSelect.value === 'quadratec') {
+        formatSelect.value = 'apg';
+      }
     }
     methodSelect.addEventListener('change', setMethodVisibility);
 
@@ -616,6 +634,7 @@ app.get('/', (req, res) => {
       document.getElementById('rf-password').value = '';
       document.getElementById('rf-remote-dir').value = '/';
       document.getElementById('rf-filename-template').value = 'turnoffroad-inventory-{date}.csv';
+      formatSelect.value = 'apg';
       setMethodVisibility();
     }
 
@@ -648,6 +667,7 @@ app.get('/', (req, res) => {
         document.getElementById('rf-password').value = '';
         document.getElementById('rf-remote-dir').value = r.remote_dir || '/';
         document.getElementById('rf-filename-template').value = r.filename_template || 'turnoffroad-inventory-{date}.csv';
+        formatSelect.value = r.format || 'apg';
         setMethodVisibility();
         document.getElementById('rf-submit').textContent = 'Save Changes';
         toggleRow.style.display = 'none';
@@ -663,6 +683,7 @@ app.get('/', (req, res) => {
       const base = {
         method,
         label: document.getElementById('rf-label').value.trim(),
+        format: formatSelect.value,
       };
       if (method === 'email') {
         return { ...base, email: document.getElementById('rf-email').value.trim() };
@@ -791,8 +812,18 @@ app.get('/api/recipients/:id', (req, res) => {
   }
 });
 
+const VALID_FORMATS_BY_METHOD = {
+  email: ['apg'],
+  sftp: ['apg', 'quadratec'],
+};
+
 function parseRecipientPayload(body) {
   const method = body.method === 'sftp' ? 'sftp' : 'email';
+  const requestedFormat = String(body.format || 'apg').trim().toLowerCase();
+  const allowedFormats = VALID_FORMATS_BY_METHOD[method];
+  if (!allowedFormats.includes(requestedFormat)) {
+    throw new Error(`Format "${requestedFormat}" not allowed for method "${method}". Allowed: ${allowedFormats.join(', ')}`);
+  }
 
   if (method === 'email') {
     const email = String(body.email || '').trim().toLowerCase();
@@ -800,7 +831,7 @@ function parseRecipientPayload(body) {
       throw new Error('Invalid email address');
     }
     const label = String(body.label || email).trim();
-    return { method, label, email };
+    return { method, label, email, format: requestedFormat };
   }
 
   // sftp
@@ -816,10 +847,10 @@ function parseRecipientPayload(body) {
   if (!password) throw new Error('Password is required');
   const remote_dir = String(body.remote_dir || '/').trim() || '/';
   const filename_template = String(body.filename_template || 'turnoffroad-inventory-{date}.csv').trim();
-  if (!filename_template.includes('{date}')) {
-    throw new Error('filename_template must include {date}');
+  if (!filename_template) {
+    throw new Error('filename_template is required');
   }
-  return { method, label, host, port, username, password, remote_dir, filename_template };
+  return { method, label, host, port, username, password, remote_dir, filename_template, format: requestedFormat };
 }
 
 app.post('/api/recipients', (req, res) => {

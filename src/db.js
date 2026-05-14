@@ -44,10 +44,17 @@ function getDb() {
       password TEXT,
       remote_dir TEXT,
       filename_template TEXT,
+      format TEXT NOT NULL DEFAULT 'apg',
       added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       active INTEGER NOT NULL DEFAULT 1
     )
   `);
+
+  // Idempotent column add for existing DBs that predate the `format` column.
+  const cols = db.prepare(`PRAGMA table_info(recipients)`).all();
+  if (!cols.some((c) => c.name === 'format')) {
+    db.exec(`ALTER TABLE recipients ADD COLUMN format TEXT NOT NULL DEFAULT 'apg'`);
+  }
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS feed_runs (
@@ -74,6 +81,8 @@ const emailRecipientSchema = z.object({
   label: z.string().min(1),
   method: z.literal('email'),
   email: z.string().email(),
+  // APG is the only email format today; left as an enum for symmetry.
+  format: z.enum(['apg']).default('apg'),
   added_at: z.string(),
   active: z.number().int(),
 });
@@ -87,10 +96,8 @@ const sftpRecipientSchema = z.object({
   username: z.string().min(1),
   password: z.string().min(1),
   remote_dir: z.string().min(1),
-  filename_template: z.string().min(1).refine(
-    (v) => v.includes('{date}'),
-    { message: "filename_template must include '{date}'" },
-  ),
+  filename_template: z.string().min(1),
+  format: z.enum(['apg', 'quadratec']).default('apg'),
   added_at: z.string(),
   active: z.number().int(),
 });
@@ -105,6 +112,7 @@ function shapeRowForValidation(row) {
     id: row.id,
     label: row.label,
     method: row.method,
+    format: row.format || 'apg',
     added_at: row.added_at,
     active: row.active,
   };
@@ -258,16 +266,16 @@ function addRecipient(data) {
 
   if (data.method === 'email') {
     const result = db.prepare(`
-      INSERT INTO recipients (label, method, email) VALUES (?, 'email', ?)
-    `).run(data.label, data.email);
+      INSERT INTO recipients (label, method, email, format) VALUES (?, 'email', ?, ?)
+    `).run(data.label, data.email, data.format || 'apg');
     return result.lastInsertRowid;
   }
 
   if (data.method === 'sftp') {
     const result = db.prepare(`
       INSERT INTO recipients
-        (label, method, host, port, username, password, remote_dir, filename_template)
-      VALUES (?, 'sftp', ?, ?, ?, ?, ?, ?)
+        (label, method, host, port, username, password, remote_dir, filename_template, format)
+      VALUES (?, 'sftp', ?, ?, ?, ?, ?, ?, ?)
     `).run(
       data.label,
       data.host,
@@ -276,6 +284,7 @@ function addRecipient(data) {
       data.password,
       data.remote_dir,
       data.filename_template,
+      data.format || 'apg',
     );
     return result.lastInsertRowid;
   }
@@ -302,6 +311,7 @@ function updateRecipient(id, data) {
     password: data.password ?? current.password,
     remote_dir: data.remote_dir ?? current.remote_dir,
     filename_template: data.filename_template ?? current.filename_template,
+    format: data.format ?? current.format ?? 'apg',
   };
 
   // If switching method, blank out the other method's fields to avoid stale values
@@ -326,7 +336,8 @@ function updateRecipient(id, data) {
       username = ?,
       password = ?,
       remote_dir = ?,
-      filename_template = ?
+      filename_template = ?,
+      format = ?
     WHERE id = ?
   `).run(
     next.label,
@@ -338,6 +349,7 @@ function updateRecipient(id, data) {
     next.password,
     next.remote_dir,
     next.filename_template,
+    next.format,
     id,
   );
 }

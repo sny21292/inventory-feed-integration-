@@ -12,27 +12,36 @@ const {
 const { startServer, setRunFeedFn } = require('./server');
 
 /**
- * Main feed job: fetch inventory → generate CSV → deliver to all active
- * recipients via their configured method (email or sftp) → log per-recipient
- * outcome → record run summary.
+ * Main feed job: fetch inventory → generate per-recipient CSV → deliver via the
+ * recipient's configured method (email or sftp) → log per-recipient outcome →
+ * record run summary.
  *
  * Failures are isolated per recipient — if APG email fails, UTV Source SFTP
  * still runs, and vice versa.
+ *
+ * Optional `filterLabels` (array of recipient labels) lets a manual run target
+ * a subset — used by the --recipient="<label>" CLI flag for staged testing.
  */
-async function runFeed() {
+async function runFeed({ filterLabels = null } = {}) {
   console.log(`[${new Date().toISOString()}] Starting inventory feed...`);
 
-  const recipients = getRecipients();
+  let recipients = getRecipients();
+
+  if (filterLabels && filterLabels.length > 0) {
+    const wanted = new Set(filterLabels.map((l) => l.toLowerCase()));
+    recipients = recipients.filter((r) => wanted.has(r.label.toLowerCase()));
+    console.log(`Filter applied: targeting ${recipients.length} recipient(s) — ${recipients.map((r) => r.label).join(', ') || '(none matched)'}`);
+  }
 
   if (recipients.length === 0) {
-    console.error('No recipients configured. Add recipients from the dashboard.');
+    console.error('No recipients to send to. Check filter or add recipients from the dashboard.');
     return;
   }
 
   const runId = startFeedRun();
 
   try {
-    // 1. Fetch inventory from Shopify
+    // 1. Fetch inventory from Shopify (one fetch shared across all recipients)
     console.log('Fetching inventory from Shopify...');
     const variants = await fetchInventory();
     console.log(`Fetched ${variants.length} variants`);
@@ -41,17 +50,26 @@ async function runFeed() {
       throw new Error('No variants returned from Shopify. Check API token and scopes.');
     }
 
-    // 2. Generate CSV (Buffer in memory — no disk write)
-    const { buffer, fileName, rowCount, sizeBytes } = generateCSV(variants);
-    console.log(`Generated CSV: ${fileName} (${rowCount} rows, ${sizeBytes} bytes)`);
-
-    // 3. Deliver to each recipient with isolated failure handling
+    // 2. Deliver to each recipient with isolated failure handling.
+    //    CSV is generated per-recipient since each format owns its own shape/filename.
     let successCount = 0;
     let failCount = 0;
+    let lastRowCount = 0;
+    let lastSizeBytes = 0;
 
     for (const recipient of recipients) {
       const recipientLabel = recipient.label;
+      const format = recipient.format || 'apg';
+      let fileName;
+      let buffer;
+      let rowCount;
+      let sizeBytes;
       try {
+        ({ buffer, fileName, rowCount, sizeBytes } = generateCSV(variants, format));
+        lastRowCount = rowCount;
+        lastSizeBytes = sizeBytes;
+        console.log(`Generated CSV for ${recipientLabel} [${format}]: ${fileName} (${rowCount} rows, ${sizeBytes} bytes)`);
+
         const result = await deliver(recipient, buffer, fileName, rowCount);
         successCount += 1;
         logSend({
@@ -72,8 +90,8 @@ async function runFeed() {
         logSend({
           recipient: recipientLabel,
           method: recipient.method,
-          filename: fileName,
-          rowCount,
+          filename: fileName || `[${format} failed before filename]`,
+          rowCount: rowCount || 0,
           status: 'failed',
           error: err.message,
         });
@@ -86,7 +104,7 @@ async function runFeed() {
       }
     }
 
-    // 4. Log feed run summary
+    // 3. Log feed run summary
     let runStatus;
     if (failCount === 0) runStatus = 'success';
     else if (successCount === 0) runStatus = 'failed';
@@ -95,8 +113,8 @@ async function runFeed() {
     completeFeedRun(runId, {
       status: runStatus,
       recipientCount: recipients.length,
-      skuCount: rowCount,
-      csvSizeBytes: sizeBytes,
+      skuCount: lastRowCount,
+      csvSizeBytes: lastSizeBytes,
     });
 
     console.log(
@@ -123,8 +141,18 @@ startServer();
 setRunFeedFn(runFeed);
 
 if (process.argv.includes('--once')) {
-  console.log('Manual run triggered with --once flag');
-  runFeed().then(() => {
+  // Optional: --recipient="Label" (repeatable) to restrict to specific recipients.
+  // Useful for staged rollout — e.g. test a brand-new SFTP partner alone before
+  // letting the daily cron send everyone.
+  const filterLabels = process.argv
+    .filter((a) => a.startsWith('--recipient='))
+    .map((a) => a.slice('--recipient='.length).replace(/^"|"$/g, ''));
+  if (filterLabels.length > 0) {
+    console.log(`Manual run with --recipient filter: ${filterLabels.join(', ')}`);
+  } else {
+    console.log('Manual run triggered with --once flag');
+  }
+  runFeed({ filterLabels: filterLabels.length > 0 ? filterLabels : null }).then(() => {
     console.log('Manual run complete.');
   });
 } else {
