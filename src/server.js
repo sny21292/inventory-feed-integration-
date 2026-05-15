@@ -142,7 +142,7 @@ app.get('/', (req, res) => {
 
   const activeRecipients = recipientsList.filter((r) => r.active === 1);
   const recipientsDisplay = activeRecipients.length > 0
-    ? activeRecipients.map((r) => r.method === 'sftp' ? `${r.label} (SFTP)` : r.email).join(', ')
+    ? activeRecipients.map((r) => r.method === 'email' ? r.email : `${r.label} (${r.method.toUpperCase()})`).join(', ')
     : 'No recipients configured';
 
   const html = `<!DOCTYPE html>
@@ -508,6 +508,7 @@ app.get('/', (req, res) => {
       .method-pill{display:inline-block;padding:2px 8px;border-radius:10px;font-family:'DM Mono',monospace;font-size:10px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;margin-left:8px}
       .pill-email{background:var(--accent-light);color:var(--accent)}
       .pill-sftp{background:var(--accent-warm-light);color:var(--accent-warm)}
+      .pill-ftps{background:#eaf1f7;color:#3c6e9b}
       .pill-inactive{background:#f0e9e6;color:#9b7e72;margin-left:8px}
     </style>
 
@@ -519,17 +520,20 @@ app.get('/', (req, res) => {
           <select id="rf-method">
             <option value="email">Email</option>
             <option value="sftp">SFTP</option>
+            <option value="ftps">FTPS</option>
           </select>
         </div>
         <div class="row">
           <label>Label</label>
-          <input type="text" id="rf-label" placeholder="e.g. APG, UTV Source" />
+          <input type="text" id="rf-label" placeholder="e.g. APG, UTV Source, Turn 5" />
         </div>
         <div class="row">
           <label>Format</label>
           <select id="rf-format">
-            <option value="apg">APG (default)</option>
-            <option value="quadratec" class="rf-format-sftp-only">Quadratec (SFTP only)</option>
+            <option value="apg" data-methods="email,sftp">APG</option>
+            <option value="quadratec" data-methods="sftp">Quadratec (SFTP)</option>
+            <option value="turn5" data-methods="ftps">Turn 5 (FTPS)</option>
+            <option value="meyer" data-methods="ftps">Meyer (FTPS)</option>
           </select>
         </div>
 
@@ -540,27 +544,27 @@ app.get('/', (req, res) => {
         </div>
 
         <!-- SFTP-only fields -->
-        <div class="row rf-sftp-only" style="display:none">
+        <div class="row rf-remote-only" style="display:none">
           <label>Host</label>
           <input type="text" id="rf-host" placeholder="sftp.example.com" />
         </div>
-        <div class="row rf-sftp-only" style="display:none">
+        <div class="row rf-remote-only" style="display:none">
           <label>Port</label>
           <input type="number" id="rf-port" value="22" min="1" max="65535" />
         </div>
-        <div class="row rf-sftp-only" style="display:none">
+        <div class="row rf-remote-only" style="display:none">
           <label>Username</label>
           <input type="text" id="rf-username" autocomplete="off" />
         </div>
-        <div class="row rf-sftp-only" style="display:none">
+        <div class="row rf-remote-only" style="display:none">
           <label>Password</label>
           <input type="password" id="rf-password" autocomplete="off" placeholder="(unchanged on edit if blank)" />
         </div>
-        <div class="row rf-sftp-only" style="display:none">
+        <div class="row rf-remote-only" style="display:none">
           <label>Remote dir</label>
           <input type="text" id="rf-remote-dir" value="/" placeholder="/" />
         </div>
-        <div class="row rf-sftp-only" style="display:none">
+        <div class="row rf-remote-only" style="display:none">
           <label>Filename</label>
           <input type="text" id="rf-filename-template" value="turnoffroad-inventory-{date}.csv" placeholder="{date} substitutes to YYYY-MM-DD; literal names also OK" />
         </div>
@@ -580,14 +584,14 @@ app.get('/', (req, res) => {
       ${recipientsList.length === 0 ? '<p style="color:var(--text-secondary);font-size:13px">No recipients added yet.</p>' : recipientsList.map(r => `
       <div class="recipient-row" id="recipient-${r.id}" style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <svg style="width:16px;height:16px;stroke:var(--accent);fill:none;stroke-width:2" viewBox="0 0 24 24">${r.method === 'sftp'
+          <svg style="width:16px;height:16px;stroke:var(--accent);fill:none;stroke-width:2" viewBox="0 0 24 24">${(r.method === 'sftp' || r.method === 'ftps')
             ? '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>'
             : '<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>'}</svg>
           <span style="font-family:'DM Mono',monospace;font-size:13px;font-weight:500">${r.label}</span>
-          <span class="method-pill ${r.method === 'sftp' ? 'pill-sftp' : 'pill-email'}">${r.method}</span>
+          <span class="method-pill pill-${r.method}">${r.method}</span>
           <span class="method-pill" style="background:#eef0e8;color:#5a6552">${r.format || 'apg'}</span>
           ${r.active === 0 ? '<span class="method-pill pill-inactive">inactive</span>' : ''}
-          ${r.method === 'sftp' && r.host ? `<span style="font-family:'DM Mono',monospace;font-size:11px;color:var(--text-secondary)">${r.username}@${r.host}:${r.port}${r.remote_dir || '/'}</span>` : ''}
+          ${(r.method === 'sftp' || r.method === 'ftps') && r.host ? `<span style="font-family:'DM Mono',monospace;font-size:11px;color:var(--text-secondary)">${r.username}@${r.host}:${r.port}${r.remote_dir || '/'}</span>` : ''}
         </div>
         <div style="display:flex;gap:6px">
           <button onclick="editRecipient(${r.id})" style="padding:6px 12px;background:none;border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:11px;font-weight:600;cursor:pointer">Edit</button>
@@ -604,22 +608,32 @@ app.get('/', (req, res) => {
 
     const formatSelect = document.getElementById('rf-format');
 
+    function defaultFormatFor(method) {
+      if (method === 'email' || method === 'sftp') return 'apg';
+      if (method === 'ftps') return 'turn5';
+      return 'apg';
+    }
+
     function setMethodVisibility() {
-      const isSftp = methodSelect.value === 'sftp';
+      const method = methodSelect.value;
+      const isEmail = method === 'email';
       document.querySelectorAll('.rf-email-only').forEach((el) => {
-        el.style.display = isSftp ? 'none' : 'grid';
+        el.style.display = isEmail ? 'grid' : 'none';
       });
-      document.querySelectorAll('.rf-sftp-only').forEach((el) => {
-        el.style.display = isSftp ? 'grid' : 'none';
+      document.querySelectorAll('.rf-remote-only').forEach((el) => {
+        el.style.display = isEmail ? 'none' : 'grid';
       });
-      // Quadratec is SFTP-only — hide that option when method=email,
-      // and snap a stale "quadratec" selection back to "apg".
-      document.querySelectorAll('.rf-format-sftp-only').forEach((el) => {
-        el.hidden = !isSftp;
+      // Filter format options by the current method via the data-methods attribute.
+      // If the currently selected format is no longer valid, snap to a sensible default.
+      let currentStillValid = false;
+      Array.from(formatSelect.options).forEach((opt) => {
+        const allowed = (opt.dataset.methods || '').split(',').map((s) => s.trim()).filter(Boolean);
+        const visible = allowed.includes(method);
+        opt.hidden = !visible;
+        opt.disabled = !visible;
+        if (visible && opt.value === formatSelect.value) currentStillValid = true;
       });
-      if (!isSftp && formatSelect.value === 'quadratec') {
-        formatSelect.value = 'apg';
-      }
+      if (!currentStillValid) formatSelect.value = defaultFormatFor(method);
     }
     methodSelect.addEventListener('change', setMethodVisibility);
 
@@ -812,15 +826,18 @@ app.get('/api/recipients/:id', (req, res) => {
   }
 });
 
+const VALID_METHODS = new Set(['email', 'sftp', 'ftps']);
+
 const VALID_FORMATS_BY_METHOD = {
   email: ['apg'],
   sftp: ['apg', 'quadratec'],
+  ftps: ['turn5', 'meyer'],
 };
 
 function parseRecipientPayload(body) {
-  const method = body.method === 'sftp' ? 'sftp' : 'email';
-  const requestedFormat = String(body.format || 'apg').trim().toLowerCase();
+  const method = VALID_METHODS.has(body.method) ? body.method : 'email';
   const allowedFormats = VALID_FORMATS_BY_METHOD[method];
+  const requestedFormat = String(body.format || allowedFormats[0]).trim().toLowerCase();
   if (!allowedFormats.includes(requestedFormat)) {
     throw new Error(`Format "${requestedFormat}" not allowed for method "${method}". Allowed: ${allowedFormats.join(', ')}`);
   }
@@ -834,9 +851,9 @@ function parseRecipientPayload(body) {
     return { method, label, email, format: requestedFormat };
   }
 
-  // sftp
+  // sftp or ftps — same field shape
   const label = String(body.label || '').trim();
-  if (!label) throw new Error('Label is required for SFTP recipients');
+  if (!label) throw new Error(`Label is required for ${method.toUpperCase()} recipients`);
   const host = String(body.host || '').trim();
   if (!host) throw new Error('Host is required');
   const port = parseInt(body.port, 10);

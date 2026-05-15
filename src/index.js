@@ -80,7 +80,7 @@ async function runFeed({ filterLabels = null } = {}) {
           bytesUploaded: result.bytesUploaded,
           status: 'success',
         });
-        if (recipient.method === 'sftp') {
+        if (result.remotePath) {
           console.log(`✓ [${recipient.method}] ${recipientLabel} → ${result.remotePath} (${result.bytesUploaded} bytes)`);
         } else {
           console.log(`✓ [${recipient.method}] ${recipientLabel}`);

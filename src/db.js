@@ -102,9 +102,25 @@ const sftpRecipientSchema = z.object({
   active: z.number().int(),
 });
 
+const ftpsRecipientSchema = z.object({
+  id: z.number().int(),
+  label: z.string().min(1),
+  method: z.literal('ftps'),
+  host: z.string().min(1),
+  port: z.number().int().positive(),
+  username: z.string().min(1),
+  password: z.string().min(1),
+  remote_dir: z.string().min(1),
+  filename_template: z.string().min(1),
+  format: z.enum(['turn5', 'meyer']).default('turn5'),
+  added_at: z.string(),
+  active: z.number().int(),
+});
+
 const recipientSchema = z.discriminatedUnion('method', [
   emailRecipientSchema,
   sftpRecipientSchema,
+  ftpsRecipientSchema,
 ]);
 
 function shapeRowForValidation(row) {
@@ -119,7 +135,7 @@ function shapeRowForValidation(row) {
   if (row.method === 'email') {
     return { ...base, email: row.email };
   }
-  if (row.method === 'sftp') {
+  if (row.method === 'sftp' || row.method === 'ftps') {
     return {
       ...base,
       host: row.host,
@@ -271,20 +287,21 @@ function addRecipient(data) {
     return result.lastInsertRowid;
   }
 
-  if (data.method === 'sftp') {
+  if (data.method === 'sftp' || data.method === 'ftps') {
     const result = db.prepare(`
       INSERT INTO recipients
         (label, method, host, port, username, password, remote_dir, filename_template, format)
-      VALUES (?, 'sftp', ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       data.label,
+      data.method,
       data.host,
       data.port,
       data.username,
       data.password,
       data.remote_dir,
       data.filename_template,
-      data.format || 'apg',
+      data.format || (data.method === 'sftp' ? 'apg' : 'turn5'),
     );
     return result.lastInsertRowid;
   }
@@ -322,7 +339,7 @@ function updateRecipient(id, data) {
     next.password = null;
     next.remote_dir = null;
     next.filename_template = null;
-  } else if (next.method === 'sftp') {
+  } else if (next.method === 'sftp' || next.method === 'ftps') {
     next.email = null;
   }
 
