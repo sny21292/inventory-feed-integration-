@@ -898,6 +898,7 @@ app.put('/api/recipients/:id', (req, res) => {
       password: req.body.password ? req.body.password : current.password,
       remote_dir: req.body.remote_dir ?? current.remote_dir,
       filename_template: req.body.filename_template ?? current.filename_template,
+      format: req.body.format ?? current.format,
     };
     const data = parseRecipientPayload(merged);
     updateRecipient(id, data);
